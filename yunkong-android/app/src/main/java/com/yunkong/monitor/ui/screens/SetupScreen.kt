@@ -36,6 +36,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
@@ -47,6 +48,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.yunkong.monitor.R
 import com.yunkong.monitor.data.MonitorViewModel
+import com.yunkong.monitor.ui.theme.BrandBlue
 
 @Composable
 fun SetupScreen(vm: MonitorViewModel) {
@@ -76,11 +78,19 @@ fun SetupScreen(vm: MonitorViewModel) {
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Spacer(Modifier.height(72.dp))
-            Image(
-                painterResource(R.mipmap.ic_launcher),
-                contentDescription = null,
-                modifier = Modifier.size(96.dp)
-            )
+            Box(
+                modifier = Modifier
+                    .size(96.dp)
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(BrandBlue),
+                contentAlignment = Alignment.Center
+            ) {
+                Image(
+                    painterResource(R.drawable.ic_launcher_foreground),
+                    contentDescription = null,
+                    modifier = Modifier.size(96.dp)
+                )
+            }
             Spacer(Modifier.height(16.dp))
             Text("云控", fontSize = 34.sp, fontWeight = FontWeight.Bold, color = s.onBackground)
             Spacer(Modifier.height(6.dp))
