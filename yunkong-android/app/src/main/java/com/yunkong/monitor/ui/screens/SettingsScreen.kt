@@ -49,7 +49,7 @@ import com.yunkong.monitor.ui.theme.Green
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(vm: MonitorViewModel, onBack: () -> Unit) {
+fun SettingsScreen(vm: MonitorViewModel, onBack: (() -> Unit)? = null) {
     val s = MaterialTheme.colorScheme
     val ui by vm.ui.collectAsStateWithLifecycle()
     val themeMode by vm.themeMode.collectAsStateWithLifecycle()
@@ -70,10 +70,12 @@ fun SettingsScreen(vm: MonitorViewModel, onBack: () -> Unit) {
             .statusBarsPadding()
     ) {
         TopAppBar(
-            title = { Text("设置", fontSize = 18.sp, fontWeight = FontWeight.Bold) },
+            title = { Text("我的", fontSize = 18.sp, fontWeight = FontWeight.Bold) },
             navigationIcon = {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回", tint = s.onSurface)
+                if (onBack != null) {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回", tint = s.onSurface)
+                    }
                 }
             },
             colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
@@ -83,7 +85,7 @@ fun SettingsScreen(vm: MonitorViewModel, onBack: () -> Unit) {
             Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(16.dp),
+                .padding(16.dp, 16.dp, 16.dp, 116.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             // 连接
@@ -178,7 +180,7 @@ fun SettingsScreen(vm: MonitorViewModel, onBack: () -> Unit) {
                     Spacer(Modifier.height(8.dp))
                     Row(Modifier.fillMaxWidth()) {
                         Text("版本", fontSize = 13.sp, color = s.onSurfaceVariant, modifier = Modifier.weight(1f))
-                        Text("1.0.0", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = s.onSurface)
+                        Text("1.0.3", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = s.onSurface)
                     }
                     Spacer(Modifier.height(6.dp))
                     Row(Modifier.fillMaxWidth()) {
