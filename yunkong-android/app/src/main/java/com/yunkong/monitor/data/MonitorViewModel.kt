@@ -39,7 +39,9 @@ data class UiState(
     val siteTitle: String = "云控",
     val baseUrl: String = "",
     val privateSite: Boolean = false,
-    val loggedIn: Boolean = false
+    val loggedIn: Boolean = false,
+    val needTurnstile: Boolean = false,
+    val turnstileMode: String = "api" // api: 全局访问凭证 / login: 登录一次性 token
 )
 
 data class DetailUi(
@@ -59,6 +61,8 @@ class MonitorViewModel(app: Application) : AndroidViewModel(app) {
         private const val KEY_BASE = "base_url"
         private const val KEY_TOKEN = "token"
         private const val KEY_THEME = "theme_mode" // 0 system / 1 light / 2 dark
+        private const val KEY_TS_VERIFIED = "ts_verified"
+        private const val KEY_TS_EXPIRES = "ts_expires"
     }
 
     private val prefs = app.getSharedPreferences(PREF, android.content.Context.MODE_PRIVATE)
@@ -69,6 +73,13 @@ class MonitorViewModel(app: Application) : AndroidViewModel(app) {
     private var reconnectJob: Job? = null
     private var pollJob: Job? = null
     private var wsAttempts = 0
+
+    // Turnstile 待续流程
+    private var pendingUrl: String? = null
+    private var pendingUser: String? = null
+    private var pendingPass: String? = null
+    private var pendingLoginToken: String? = null
+    private var lastTurnstileDismiss = 0L
 
     /** 保持 /api/servers 返回顺序的服务器状态表 */
     private val serverMap = LinkedHashMap<String, ServerState>()
@@ -85,7 +96,9 @@ class MonitorViewModel(app: Application) : AndroidViewModel(app) {
     init {
         val saved = prefs.getString(KEY_BASE, null)
         if (saved != null) {
-            api = ApiClient(saved, prefs.getString(KEY_TOKEN, null))
+            val client = ApiClient(saved, prefs.getString(KEY_TOKEN, null))
+            restoreTurnstile(client)
+            api = client
             _ui.value = _ui.value.copy(baseUrl = saved)
             connectInternal()
         }
@@ -108,20 +121,43 @@ class MonitorViewModel(app: Application) : AndroidViewModel(app) {
         scope.launch {
             try {
                 val client = ApiClient(withScheme)
+                restoreTurnstile(client)
                 val config = client.getConfig()
                 val isPublic = config.bool("is_public") ?: true
+                val tsEnabled = config.bool("turnstile_enabled") ?: false
+                val tsLoginEnabled = config.bool("turnstile_login_enabled") ?: false
                 var token: String? = prefs.getString(KEY_TOKEN, null)
                 client.token = token
+
+                // 全局人机验证：所有 /api/* 需要有效凭证
+                if (tsEnabled && !client.hasValidTurnstile()) {
+                    pendingUrl = withScheme; pendingUser = username; pendingPass = password
+                    api = client
+                    _ui.value = _ui.value.copy(
+                        loading = false, needTurnstile = true, turnstileMode = "api",
+                        config = config, error = "该站点开启了人机验证，请先完成验证"
+                    )
+                    return@launch
+                }
                 if (!isPublic) {
                     if (username != null && password != null && username.isNotBlank()) {
-                        token = client.login(username, password)
-                    } else if (token == null) {
-                        withContext(Dispatchers.Main) {
+                        val loginToken = pendingLoginToken
+                        if ((tsEnabled || tsLoginEnabled) && loginToken == null) {
+                            pendingUrl = withScheme; pendingUser = username; pendingPass = password
+                            api = client
                             _ui.value = _ui.value.copy(
-                                loading = false,
-                                error = "该站点为私有站点，请展开「私有站点登录」并填写管理账号"
+                                loading = false, needTurnstile = true, turnstileMode = "login",
+                                config = config, error = "登录需要先完成人机验证"
                             )
+                            return@launch
                         }
+                        token = client.login(username, password, loginToken)
+                        pendingLoginToken = null
+                    } else if (token == null) {
+                        _ui.value = _ui.value.copy(
+                            loading = false,
+                            error = "该站点为私有站点，请展开「私有站点登录」并填写管理账号"
+                        )
                         return@launch
                     }
                 }
@@ -130,21 +166,79 @@ class MonitorViewModel(app: Application) : AndroidViewModel(app) {
                 client.token = token
                 api = client
                 prefs.edit().putString(KEY_BASE, withScheme).putString(KEY_TOKEN, token).apply()
-                withContext(Dispatchers.Main) {
-                    _ui.value = _ui.value.copy(
-                        configured = true, loading = false, error = null,
-                        baseUrl = withScheme,
-                        privateSite = !isPublic, loggedIn = token != null
-                    )
-                }
+                pendingUrl = null; pendingUser = null; pendingPass = null
+                _ui.value = _ui.value.copy(
+                    configured = true, loading = false, error = null,
+                    baseUrl = withScheme,
+                    privateSite = !isPublic, loggedIn = token != null,
+                    needTurnstile = false
+                )
                 connectInternal()
             } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    _ui.value = _ui.value.copy(loading = false, error = friendly(e))
-                }
+                _ui.value = _ui.value.copy(loading = false, error = friendly(e))
             }
         }
     }
+
+    private fun restoreTurnstile(client: ApiClient) {
+        val blob = prefs.getString(KEY_TS_VERIFIED, null) ?: return
+        val exp = prefs.getLong(KEY_TS_EXPIRES, 0L)
+        if (System.currentTimeMillis() < exp) {
+            client.turnstileVerified = blob
+            client.turnstileVerifiedExpires = exp
+        }
+    }
+
+    /** 人机验证完成（WebView 回调） */
+    fun submitTurnstileToken(token: String) {
+        val mode = _ui.value.turnstileMode
+        scope.launch {
+            try {
+                val client = api ?: throw IOException("未连接")
+                if (mode == "login") {
+                    pendingLoginToken = token
+                } else {
+                    val cfg = client.exchangeTurnstile(token)
+                    val blob = cfg.str("turnstile_verified")
+                    if (cfg.bool("verified") != true || blob == null) {
+                        throw IOException("人机验证未通过，请重试")
+                    }
+                    val exp = System.currentTimeMillis() + 3_600_000
+                    client.turnstileVerified = blob
+                    client.turnstileVerifiedExpires = exp
+                    prefs.edit().putString(KEY_TS_VERIFIED, blob).putLong(KEY_TS_EXPIRES, exp).apply()
+                }
+                _ui.value = _ui.value.copy(needTurnstile = false, error = null)
+                val url = pendingUrl
+                if (url != null) connect(url, pendingUser, pendingPass)
+                else if (mode != "login") refreshInternal()
+            } catch (e: Exception) {
+                _ui.value = _ui.value.copy(needTurnstile = false, loading = false, error = friendly(e))
+            }
+        }
+    }
+
+    /** 用户取消验证（离开验证页），60 秒内不再自动弹出 */
+    fun dismissTurnstile() {
+        lastTurnstileDismiss = System.currentTimeMillis()
+        pendingLoginToken = null
+        _ui.value = _ui.value.copy(needTurnstile = false, loading = false)
+    }
+
+    fun ensureTurnstileConfig() {
+        if (_ui.value.config != null) return
+        val client = api ?: return
+        scope.launch {
+            try {
+                val cfg = client.getConfig()
+                _ui.value = _ui.value.copy(config = cfg)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    fun baseUrlForWebView(): String =
+        (api?.baseUrl ?: _ui.value.baseUrl).trimEnd('/') + "/"
 
     /** 私有站点登录 */
     fun login(username: String, password: String) {
@@ -196,7 +290,16 @@ class MonitorViewModel(app: Application) : AndroidViewModel(app) {
             }
             emitServers()
         } catch (e: Exception) {
-            if (e is ApiException && e.code == 401) {
+            if (e is ApiException && e.code == 403 && e.message.orEmpty().contains("turnstile", true)
+                && System.currentTimeMillis() - lastTurnstileDismiss > 60_000
+            ) {
+                api?.turnstileVerified = null
+                prefs.edit().remove(KEY_TS_VERIFIED).remove(KEY_TS_EXPIRES).apply()
+                _ui.value = _ui.value.copy(
+                    loading = false, error = "人机验证已过期，请重新完成验证",
+                    needTurnstile = true, turnstileMode = "api"
+                )
+            } else if (e is ApiException && e.code == 401) {
                 withContext(Dispatchers.Main) {
                     _ui.value = _ui.value.copy(loading = false, error = friendly(e), loggedIn = false)
                 }
@@ -378,7 +481,16 @@ class MonitorViewModel(app: Application) : AndroidViewModel(app) {
                     .sortedBy { it.long("timestamp") ?: 0L }
                 _detail.value = _detail.value.copy(history = rows, historyLoading = false)
             } catch (e: Exception) {
-                _detail.value = _detail.value.copy(historyLoading = false, error = friendly(e))
+                if (e is ApiException && e.code == 403 && e.message.orEmpty().contains("turnstile", true)
+                    && System.currentTimeMillis() - lastTurnstileDismiss > 60_000
+                ) {
+                    api?.turnstileVerified = null
+                    prefs.edit().remove(KEY_TS_VERIFIED).remove(KEY_TS_EXPIRES).apply()
+                    _detail.value = _detail.value.copy(historyLoading = false, error = "人机验证已过期")
+                    _ui.value = _ui.value.copy(needTurnstile = true, turnstileMode = "api")
+                } else {
+                    _detail.value = _detail.value.copy(historyLoading = false, error = friendly(e))
+                }
             }
         }
     }
@@ -387,10 +499,15 @@ class MonitorViewModel(app: Application) : AndroidViewModel(app) {
         _detail.value = _detail.value.copy(error = null)
     }
 
-    private fun friendly(e: Exception): String = when (e) {
-        is ApiException -> e.message ?: "请求失败 (${e.code})"
-        is IOException -> "网络连接失败：${e.message ?: "请检查地址与网络"}"
-        else -> "出错了：${e.message ?: e.javaClass.simpleName}"
+    private fun friendly(e: Exception): String {
+        if (e is ApiException && e.message.orEmpty().contains("turnstile", true)) {
+            return "需要完成 Cloudflare 人机验证"
+        }
+        return when (e) {
+            is ApiException -> e.message ?: "请求失败 (${e.code})"
+            is IOException -> "网络连接失败：${e.message ?: "请检查地址与网络"}"
+            else -> "出错了：${e.message ?: e.javaClass.simpleName}"
+        }
     }
 
     override fun onCleared() {

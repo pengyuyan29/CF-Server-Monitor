@@ -20,6 +20,13 @@ class ApiClient(
     @Volatile var token: String? = null
 ) {
 
+    /** Turnstile 验证凭证（服务端下发，1 小时有效） */
+    @Volatile var turnstileVerified: String? = null
+    @Volatile var turnstileVerifiedExpires: Long = 0L
+
+    fun hasValidTurnstile(): Boolean =
+        turnstileVerified != null && System.currentTimeMillis() < turnstileVerifiedExpires
+
     val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(12, TimeUnit.SECONDS)
         .readTimeout(25, TimeUnit.SECONDS)
@@ -39,15 +46,19 @@ class ApiClient(
         return sb.toString()
     }
 
-    private fun request(path: String, query: Map<String, String> = emptyMap()): Request {
+    private fun request(path: String, query: Map<String, String> = emptyMap(), turnstileToken: String? = null): Request {
         val b = Request.Builder().url(url(path, query))
             .header("User-Agent", "YunKong/1.0")
         token?.let { b.header("Authorization", "Bearer $it") }
+        turnstileVerified?.takeIf { System.currentTimeMillis() < turnstileVerifiedExpires }?.let {
+            b.header("X-Turnstile-Verified", it)
+        }
+        turnstileToken?.let { b.header("X-Turnstile-Token", it) }
         return b.build()
     }
 
-    private fun getJson(path: String, query: Map<String, String> = emptyMap()): JsonObject {
-        val resp: Response = http.newCall(request(path, query)).execute()
+    private fun getJson(path: String, query: Map<String, String> = emptyMap(), turnstileToken: String? = null): JsonObject {
+        val resp: Response = http.newCall(request(path, query, turnstileToken)).execute()
         resp.use { r ->
             val body = r.body?.string().orEmpty()
             if (!r.isSuccessful) throw ApiException(r.code, errorMessage(body, r.code))
@@ -69,8 +80,11 @@ class ApiClient(
         }
     }
 
-    /** 站点配置 */
+    /** 站点配置（无凭证时服务端旁路 Turnstile） */
     fun getConfig(): JsonObject = getJson("/api/config")
+
+    /** 用一次性 Turnstile token 换取 1 小时 verified 凭证（响应含 turnstile_verified） */
+    fun exchangeTurnstile(token: String): JsonObject = getJson("/api/config", turnstileToken = token)
 
     /** 服务器列表 */
     fun getServers(): JsonObject = getJson("/api/servers")
@@ -91,15 +105,18 @@ class ApiClient(
     private fun trimHours(h: Double): String =
         if (h == h.toLong().toDouble()) h.toLong().toString() else h.toString()
 
-    /** 管理端登录（私有站点），返回 JWT */
-    fun login(username: String, password: String): String {
+    /** 管理端登录（私有站点），返回 JWT；开启 Turnstile 时需要一次性 token */
+    fun login(username: String, password: String, turnstileToken: String? = null): String {
         val payload = buildJsonObject {
             put("action", "login")
             put("username", username)
             put("password", password)
         }.toString()
-        val req = Request.Builder()
+        val builder = Request.Builder()
             .url(url("/admin/api"))
+            .header("User-Agent", "YunKong/1.0")
+        turnstileToken?.let { builder.header("X-Turnstile-Token", it) }
+        val req = builder
             .post(payload.toRequestBody("application/json; charset=utf-8".toMediaType()))
             .build()
         val resp = http.newCall(req).execute()

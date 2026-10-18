@@ -18,6 +18,7 @@ import com.yunkong.monitor.ui.screens.DashboardScreen
 import com.yunkong.monitor.ui.screens.DetailScreen
 import com.yunkong.monitor.ui.screens.SettingsScreen
 import com.yunkong.monitor.ui.screens.SetupScreen
+import com.yunkong.monitor.ui.screens.TurnstileScreen
 import com.yunkong.monitor.ui.theme.YunKongTheme
 
 class MainActivity : ComponentActivity() {
@@ -60,6 +61,16 @@ private fun App(vm: MonitorViewModel) {
             }
             composable("settings") {
                 SettingsScreen(vm) { nav.popBackStack() }
+            }
+            composable("turnstile") {
+                TurnstileScreen(vm) { nav.popBackStack() }
+            }
+        }
+
+        // 需要人机验证时自动进入验证页
+        LaunchedEffect(ui.needTurnstile) {
+            if (ui.needTurnstile && nav.currentDestination?.route != "turnstile") {
+                nav.navigate("turnstile") { launchSingleTop = true }
             }
         }
 
